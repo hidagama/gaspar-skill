@@ -4,6 +4,11 @@ Operational runbook for working with [Gaspar](https://gaspar.hidagama.com), an e
 
 > If you only have 60 seconds: read the [Pre-flight checklist](#3-pre-flight-checklist-before-any-campaign-fires) and follow it religiously.
 
+**Version 1.1 — last verified against the live API on 2026-08-31.** Every endpoint, verdict and
+behaviour below was checked against production on that date. If you are reading this months later,
+treat the endpoint reference in section 18 as the part most likely to have drifted, and
+`GET /auth/check` as the cheapest way to confirm your key and scopes still work.
+
 ---
 
 ## Table of contents
@@ -15,7 +20,7 @@ Operational runbook for working with [Gaspar](https://gaspar.hidagama.com), an e
 5. [Campaign body shape (POST /campaigns)](#5-campaign-body-shape)
 6. [HTML email design — table-based, mobile-safe, brand-perfect](#6-html-email-design)
 7. [Subject lines — craft + limits](#7-subject-lines)
-8. [Recipient management — manual, CSV, Sheets, audiences](#8-recipient-management)
+8. [Recipient management — manual, CSV, Sheets, audiences, List Health](#8-recipient-management)
 9. [Template syntax (merge fields, fallbacks, special variables)](#9-template-syntax)
 10. [The watchdog — and how to unpause without re-pause](#10-the-watchdog)
 11. [Click-tracking + UTM attribution](#11-click-tracking)
@@ -97,6 +102,7 @@ echo "$TS_MS"
 
 Run every box. Skipping any has cost real campaigns.
 
+- [ ] **0. List verified** — `POST /verify-list` on a bought, scraped, or dormant list before its first send (section 8.7). Bounces are the single most common reason a campaign auto-pauses.
 - [ ] **1. Audience scope confirmed in writing** — "all ~N non-suppressed contacts from list X" not "all contacts"
 - [ ] **2. Throttle rate sane for sender** — Gmail OAuth caps at ~30/hr safely. Verified custom domains allow more. Verify the connected account at `GET /accounts`
 - [ ] **3. `scheduled_start_at` echoed in BOTH operator-local AND UTC** before save
@@ -468,6 +474,44 @@ curl -sS -X POST -H "Authorization: Bearer $GASPAR_API_KEY" -H "Content-Type: ap
 
 Returns enriched fields you can merge into your recipient objects before sending.
 
+### 8.7 List Health — verify before you send
+
+`POST /verify-list` checks a list for addresses that will bounce, **before** they cost you sender
+reputation. Pass either the raw list or a campaign whose recipients are still pending:
+
+```bash
+# an ad-hoc list (max 5,000 per call, rate-limited)
+curl -sS -X POST -H "Authorization: Bearer $GASPAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{ "emails": ["a@x.com", "b@y.com"] }' \
+  https://api.hidagama.com/api/gaspar/verify-list
+
+# or every pending recipient on a campaign
+curl -sS -X POST -H "Authorization: Bearer $GASPAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{ "campaign_id": "<uuid>" }' \
+  https://api.hidagama.com/api/gaspar/verify-list
+```
+
+You get back `total`, `sendable`, a `counts` breakdown, `duplicates`, a 0-100 `score`, and
+`residual_risk`. Each address carries one verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `invalid` | not a valid address — malformed, will always fail |
+| `garbage` | scraper artefact (truncated, concatenated, markup bleed) |
+| `disposable` | throwaway-mailbox provider |
+| `role` | `info@`, `sales@`, `support@` — deliverable but low-engagement and complaint-prone |
+| `bounced_before` | this address has hard-bounced already |
+| `unverified` | nothing disqualifying found |
+
+**`unverified` is the best verdict available, and that is deliberate.** Nothing short of
+delivering a message proves a mailbox accepts mail, so there is no "valid" verdict to hand you —
+a tool that promises one is guessing. For the same reason `score` is capped below 100 whenever
+any address is only domain-verified, and `residual_risk` reports the measured share of addresses
+that pass every check here and bounce anyway. Plan for it rather than being surprised by it.
+
+Run this before a first send to a bought, scraped, or long-dormant list — those are where the
+bounce rate that pauses a campaign comes from.
+
 ---
 
 ## 9. Template syntax
@@ -650,6 +694,9 @@ curl -sS -H "Authorization: Bearer $GASPAR_API_KEY" \
 
 Replies are conversion-worthy — vasco/the campaign owner should reply to them manually.
 
+`POST /replies/scan` forces an immediate scan of the connected mailbox instead of waiting for the
+next scheduled pass. Use it when you have just been told a reply landed and want it attributed now.
+
 ### Inbound webhook (`/inbound`)
 
 External services (e.g., Mailgun, SES inbound) can POST reply notifications to `/api/gaspar/inbound`. Configure on your ESP side.
@@ -741,20 +788,28 @@ If you're using Gaspar with the DaGaMa trade-show ecosystem, `GET /shows` + `GET
 | `/sheets-meta` | GET | Inspect a Google Sheet's columns |
 | `/sheets-import` | POST | Import recipients from Sheets |
 | `/enrich` | POST | Enrich emails with company/country |
+| `/verify-list` | POST | Pre-send list verification (section 8.7) |
 | `/suppressions` | POST | Block an address |
 | `/sequences` | GET, POST | Multi-step sequences |
 | `/forms` | GET, POST | Lead-capture forms |
 | `/replies` | GET | Captured replies |
+| `/replies/scan` | POST | Force an immediate reply scan |
 | `/inbound` | POST | Webhook for external ESPs |
 | `/signature` | GET, POST | Sender email signature |
 | `/upload-image` | POST | Upload to Gaspar's image CDN |
 | `/deliverability` | GET | Cross-campaign deliverability metrics |
+| `/reports/rebuild` | POST | Rebuild a campaign's report sheet in place |
 | `/smart-send-time` | GET | Engagement-optimal send time |
 | `/show-roi`, `/shows` | GET | Trade-show ROI (DaGaMa ecosystem) |
 | `/ga/oauth/start`, `/ga/properties`, `/ga/metrics/{id}` | POST, GET | GA4 connector |
+| `/ga/properties/select` | POST | Choose which GA4 property to attribute against |
+| `/ga/connection` | GET, DELETE | Read or disconnect the GA4 link |
 | `/meta/connect`, `/meta/callback`, `/meta/ad-accounts` | POST, GET | Meta retargeting |
+| `/meta/account` | GET, DELETE | Read or disconnect the linked Meta account |
+| `/meta/account/select` | POST | Choose which ad account to push audiences to |
 | `/stripe/checkout`, `/stripe/portal`, `/stripe/status` | POST, GET | Gaspar billing |
 | `/usage`, `/plan` | GET | Current plan + usage stats |
+| `/trial` | GET | Trial state and days remaining |
 
 ---
 
