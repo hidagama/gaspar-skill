@@ -18,7 +18,7 @@ Operational runbook for working with [Gaspar](https://gaspar.hidagama.com), an e
 8. [Recipient management — manual, CSV, Sheets, audiences](#8-recipient-management)
 9. [Template syntax (merge fields, fallbacks, special variables)](#9-template-syntax)
 10. [The watchdog — and how to unpause without re-pause](#10-the-watchdog)
-11. [Click-tracking gotcha + UTM workaround](#11-click-tracking)
+11. [Click-tracking + UTM attribution](#11-click-tracking)
 12. [Frequency rules + sequence staggering](#12-frequency-rules)
 13. [Quick-send vs full campaign vs test-send](#13-quick-send-vs-full-campaign-vs-test-send)
 14. [Sequences (multi-step follow-ups)](#14-sequences)
@@ -480,51 +480,48 @@ Returns enriched fields you can merge into your recipient objects before sending
 | `{{email}}` — special, recipient's own email at send time | `{{recipient.email}}` — no nested paths |
 | `{{campaign_id}}` — special, the campaign's UUID | `{{campaign.id}}` — no nested paths |
 
-**Test-sends skip merge-field substitution.** When you send a test via `POST /test-send`, `{{firstName}}` renders literally. This is a Gaspar limitation. Verify by inspecting `GET /campaigns/{id}` — the template you see is what's sent (with substitutions overlaid).
+**Test-sends show placeholders, not merged data.** `POST /test-send` renders each `{{field}}` as a highlighted `[field]` chip (and `{{email}}` as your own test address), so you can see at a glance which fields will merge. It does not pull a real recipient's row. To see genuinely merged output, send to a one-recipient list containing your own address, or use `/quick-send`.
 
 **No first-class unsubscribe variable.** Hand-build the URL: `https://api.hidagama.com/api/gaspar/u?e={{email}}&c={{campaign_id}}`. There is no `{{unsubscribe_url}}`.
 
-**No `List-Unsubscribe` header.** Gaspar doesn't set the standards-compliant header automatically — body-link unsubscribe is the only path today.
+**`List-Unsubscribe` is set for you.** Every send carries `List-Unsubscribe` plus `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, so Gmail and Yahoo render their native one-click unsubscribe control. You do not need to add it. A visible unsubscribe link in the body is still good practice on top of it.
 
 ---
 
 ## 10. The watchdog — and how to unpause without re-pause
 
-Gaspar runs a server-side watchdog every few minutes that **auto-pauses any campaign with bounce rate exceeding ~5%** over the trailing 24h window.
+Gaspar runs a server-side deliverability watchdog that automatically pauses a campaign when its recent bounce rate crosses a safety threshold. This protects the sending domain's reputation, which outlives any single campaign. The threshold and window are deliberately not published.
 
-**Math:**
-```
-bounce_rate = bounces_in_last_24h / total_sent_in_last_24h
-if bounce_rate > 0.05: pause campaign
-```
-
-**The trap:** if you unpause without changing the math, the next watchdog tick re-pauses. Symptom — campaign briefly resumes, fires 3-5 more, gets re-paused.
+**The trap:** unpausing without resolving the bounced addresses puts the same dead rows back in the queue, and the campaign pauses again. Symptom — it briefly resumes, fires a few more, stops.
 
 **Safe unpause workflow:**
 
 1. Identify bounced recipients: `GET /campaigns/{id}/recipients?status=bounced`
-2. **DO NOT DELETE THEM** — foreign-key constraints from the events table will fail.
-3. Mark them as `suppressed` instead (admin endpoint on Pro plans, or update via bulk-status endpoint). `suppressed` = "blocked from sending", does NOT count in watchdog math.
+2. **Do not delete them** — they are referenced by the events table, so the delete fails. Their history is also what stops the same dead addresses being re-imported later.
+3. Transition them to `suppressed`, which blocks them from this and every future send.
 4. Resume: `POST /campaigns/{id}/resume`
-5. Watch the next 1-2 watchdog ticks (~10 min). If it stays running, you're done.
+5. Give it a few minutes and confirm it is still running.
 
 **`bounced` vs `suppressed`:**
-- `bounced` = recent bounce, counts in watchdog math
-- `suppressed` = blocked from sending, does NOT count in watchdog math
+
+- `bounced` = the address failed on a recent send
+- `suppressed` = blocked from receiving any further campaign from you
+
+If it pauses again after a clean suppression pass, the list itself is the problem. Verify it before sending (section 3) rather than resuming repeatedly — repeated sends into a bad list is how a sending domain gets burned.
 
 ---
 
 ## 11. Click-tracking
 
-**Known limitation:** Gaspar's link-rewriter wraps the unsubscribe footer link, but does NOT wrap body CTAs even when `track_clicks: 1` is set. Result: every click on the main CTA bypasses the tracking endpoint. Campaign stats show `clicks: 0` even when real humans are clicking.
+Every `<a href>` in your HTML is rewritten to route through Gaspar's click tracker before redirecting to the real destination, so CTA clicks are recorded — not just the unsubscribe link. Your UTM parameters survive the redirect.
 
-**Workaround: attribute via analytics layer (GA4 / Plausible / etc.):**
+Reported click counts are **human clicks only**. Corporate security gateways and link scanners fetch every URL in an email before the recipient ever sees it; that traffic is classified separately and excluded. Your numbers will read lower than a raw hit count, and truer.
 
-1. **Every CTA must include UTM**: `?utm_source=gaspar&utm_medium=email&utm_campaign=<your_slug>`
+**Still put UTMs on every CTA.** Click tracking tells you a click happened; analytics tells you what happened next.
+
+1. **Every CTA gets UTM**: `?utm_source=gaspar&utm_medium=email&utm_campaign=<your_slug>`
 2. **GA4 → Acquisition → Traffic Acquisition** filtered by `Session source = gaspar` shows real arrivals.
 3. **Realtime view** during a fresh fire shows clicks within seconds.
-
-**Do not** debug copy or design until you've checked your analytics. Clicks ARE happening — Gaspar just isn't counting them.
 
 Gaspar also has a built-in GA4 connector:
 ```bash
@@ -567,7 +564,7 @@ When running a sequence (kickoff + reminder 1 + reminder 2 + post-event):
 1. **Distinct `scheduled_start_at` per campaign.** Never leave two at the same timestamp.
 2. **If you ever unpause multiple campaigns at once, stagger them ≥1 hour.** Otherwise all resume simultaneously and recipients see 3 emails arrive together.
 3. **Before resuming, verify `scheduled_start_at` is FUTURE.** If past, campaign fires immediately on resume.
-4. **After unpause, watch the next 2 watchdog ticks** before walking away.
+4. **After unpause, watch it for a few minutes** before walking away — confirm it is still running.
 
 ---
 
@@ -842,7 +839,7 @@ Schedule: 7-14 days after the last send
 1. **Local-time / UTC confusion** when setting `scheduled_start_at`. Always echo both timezones before save (section 2).
 2. **Watchdog cascade-pauses a sequence.** Bounce spike on E1 auto-pauses; unpausing without addressing bounced rows triggers re-pause. → Transition bounced → suppressed FIRST (section 10).
 3. **Multiple paused campaigns resume simultaneously.** Recipients see 3-4 emails arrive at once. → Stagger unpauses ≥1 hour (section 12).
-4. **Humans opened, dashboard says 0 clicks.** Body-CTA wrapper limitation. → UTM every CTA, verify via analytics layer (section 11).
+4. **Raw click counts look lower than you expected.** Scanner and gateway traffic is filtered out; only human clicks are reported. → Cross-check against your analytics layer via UTMs (section 11).
 5. **Sending the 4th email in 5 days to the same list.** Open rate degrades, unsubscribes spike. → Frequency check (section 12). Acknowledge over-send in body if you must send.
 
 ---

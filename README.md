@@ -16,7 +16,7 @@ A single self-contained `SKILL.md` that documents:
 4. **Campaign body shape** — exact request format for `POST /campaigns`
 5. **Template syntax** — `{{var | fallback}}` works, every other syntax doesn't
 6. **Watchdog behavior** — auto-pause math + the bounced→suppressed unpause workflow
-7. **Click-tracking limitation** — the known wrapper bug + GA4 workaround
+7. **Click-tracking + attribution** — how clicks are counted, and cross-checking with UTMs / GA4
 8. **Frequency rules** — cadence math and when to acknowledge over-sends
 9. **Sequence staggering** — preventing the "3 emails at once" failure mode
 10. **Completion report pipeline** — the ≥25-recipient gate
